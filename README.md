@@ -1,0 +1,1 @@
+Simple clojure app which detects file events in a source directory, and mirrors them to a target directory.
