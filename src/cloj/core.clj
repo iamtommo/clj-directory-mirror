@@ -3,48 +3,50 @@
   (:import [java.io.File]
            [java.lang.Runnable])
   (:require [cloj.watch :refer :all]
-            [clojure.java.io :as io]))
+            [clojure.java.io :as io]
+            [clojure.tools.cli :refer :all]))
 
-(def backup-file-suffix "___jb")
-(def path-prefix "/home/ThomasMadsen/dev/git/egym/server/")
+; Jetbrains backup files generalls end with ___jb___, ___jb_bak___, ___jb_bak_old___, etc.
+(def jetbrains-backup-file-suffix "___jb")
 
-(def source-path
-  (apply str path-prefix "webapp/src/main/java/de/egym/cms/page/"))
 
-(def target-path
-  (apply str path-prefix "webapp/target-gradle/libs/egym-webapp/WEB-INF/classes/de/egym/cms/page/"))
+;; (def path-prefix "/home/ThomasMadsen/dev/git/egym/server/")
+;; (def source-path
+;;   (apply str path-prefix "webapp/src/main/java/de/egym/cms/page/"))
+;; (def target-path
+;;   (apply str path-prefix "webapp/target-gradle/libs/egym-webapp/WEB-INF/classes/de/egym/cms/page/"))
 
-(defn print-event
-  "Prints basic info about the event"
-  [event path]
-  (let [name (.getFileName path)]
-    (println event " --> "
-             (clojure.string/join ", "
-                                  [name
-                                   (.toAbsolutePath name)
-                                   (.toUri name)
-                                   (.getParent name)
-                                   (.toRealPath name)]))))
+(def source-dir nil)
+(def target-dir nil)
+
+(def file-directory-map {})
 
 (defn unix-path-to-string
-  [unixpath]
-  (.toString (.toUri unixpath)))
+  [path]
+  (.toString (.toUri path)))
 
 (defn file-name-of
-  [unixpath]
-  (.toString (.getFileName unixpath)))
+  [path]
+  (.toString (.getFileName path)))
+
+(defn is-jetbrains-backup-file?
+  [file]
+  (.contains (.toString (.getFileName file)) jetbrains-backup-file-suffix))
 
 (defn mirror-change-create
   [path]
-  (if-not (.contains (.toString (.getFileName path)) backup-file-suffix)
-    ;; backup files are suffixed with ___jb___ and ___jb_bak___
+  (if-not (is-jetbrains-backup-file? path)
     (do 
-      (println "Mirroring file creation > ")
-      (let [src (str source-path (.getFileName path))
-           trg (str target-path (.getFileName path))]
-        (println "\t from > " src)
-        (println "\t to   > " trg)
-        (io/copy (io/file src) (io/file trg))))))
+      (println "Mirroring file creation > " path)
+      (let [mapping (get file-directory-map (file-name-of path))
+            file-name (file-name-of path)]
+        (let [relative-source (clojure.string/replace mapping source-dir "")
+              path-from (str mapping "/" file-name)
+              path-to (str target-dir relative-source "/" file-name)]
+;          (println "relative source for [" file-name "] is " relative-source)
+;          (println "from " (str mapping "/" file-name))
+;          (println "to " (str target-dir relative-source "/" file-name))
+          (io/copy (io/file path-from) (io/file path-to)))))))
 
 (defn mirror-change-modify
   [path]
@@ -65,11 +67,11 @@
    (= event :delete)
      (mirror-change-delete path)))
 
-(defn watch-file
+(defn watch-directory
   [file]
   (let [path (.getAbsolutePath file)]
     (println "Spying on directory ->" path)
-    (watch-path (.getAbsolutePath file) 
+    (watch-path path 
                 :create event-handler
                 :modify event-handler
                 :delete event-handler)))
@@ -78,15 +80,47 @@
   []
   (stop-watchers))
 
-(defn watch-directory
-  "Recursively starts a watcher on every single file in the directory"
-  [directory]
-  (let [directory-file (clojure.java.io/file directory)]
-    (map #(if (.isDirectory %) (watch-file %)) (file-seq directory-file))))
+(defn verify-is-directory
+  [file]
+  (.isDirectory file))
 
-;; (defn -main
-;;   [& args]
-;;   (if (> (count args) 0)
-;;     (let [project-directory (nth args 0)]
-;;       (watch-directory project-directory))
-;;     (println "Directory not provided...")))
+(defn mirror-directories
+  "Recursively starts a watcher on every single file in the directory and mirrors changes from source to dest"
+  [source-dir target-dir]
+  (def source-dir (.getAbsolutePath source-dir))
+  (def target-dir (.getAbsolutePath target-dir))
+  (println "Mirroring directories >")
+  (println "\tsource > " source-dir)
+  (println "\ttarget > " target-dir)
+  (println "========================================")
+  (doseq [file (file-seq source-dir)]
+    (let [key (.getName file)
+          val (.getAbsolutePath (.getParentFile file))]
+      (def file-directory-map (assoc file-directory-map key val))
+      (if (verify-is-directory file)
+        (watch-directory file)))))
+
+(def cli-options
+  [["-s" "--source SOURCE" "Source directory to mirror files from."
+    :parse-fn #(io/file %)
+    :validate [verify-is-directory "Source is not a directory."]]
+   ["-t" "--target TARGET" "Target directory to mirror files to."
+    :parse-fn #(io/file %)
+    :validate [verify-is-directory "Target is not a directory."]]])
+
+(defn exit
+  [status errors]
+  (println errors)
+  (System/exit status))
+
+(defn -main
+  [& args]
+  (let [{:keys [options arguments errors summary]} (parse-opts args cli-options)]
+    (cond
+     (:help options) (exit 0 "Specify source and target directory with -s DIRECTORY -t DIRECTORY respectively.")
+     (not= (count options) 2) (exit 1 "Insufficient arguments provided.")
+     errors (exit 1 (str "Errors: \n\n" (clojure.string/join \newline errors)))
+     :else (do
+             (mirror-directories (:source options) (:target options))
+             ; Sit in a loop until we are terminated
+             (while true)))))
